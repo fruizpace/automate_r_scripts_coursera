@@ -32,17 +32,25 @@ library(tidyr)
 
 
 ## Load the prediction model
-
+readmit_model <- read_rds("inst/final_readmission_model.rds")
 
 ##---------------------------------------------------------------------------##
 ## Decrpyt authorization to Google Drive and Google Sheet
 ##---------------------------------------------------------------------------##
 
 ## googledrive De-auth setup
-
+googledrive::drive_auth(
+  path = gargle::secret_decrypt_json("inst/googledrive_encrypt.json",
+                                     "GOOGLEDRIVE_KEY"
+                                     )
+)
 
 ## googlesheet De-auth setup
-
+googlesheets4::gs4_auth(
+  path = gargle::secret_decrypt_json("inst/googledrive_encrypt.json",
+                                     "GOOGLEDRIVE_KEY"
+  )
+)
 
 ##---------------------------------------------------------------------------##
 ##---------------------------------------------------------------------------##
@@ -55,19 +63,24 @@ library(tidyr)
 ##---------------------------------------------------------------------------##
 
 ## Load the googlesheet where data is stored
-
+sheet_id <- "https://docs.google.com/spreadsheets/d/1fDAJOAWpq4_rvaL_QLPMJA1kqLe81xXqT-207QbehK0/edit?usp=sharing"
 
 ## Load the patient raw data from the first sheet
-
+patient_data <- read_sheet(sheet_id, sheet = 1)
 
 ## Read the second sheet that will contain the patient data and prediction
-
+patient_data_with_pred <- read_sheet(sheet_id, sheet = 2)
 
 ## Make predictions for the patient data (sheet 1)
-
-
+pred_data <- augment(readmit_model, patient_data) |>
+  select(all_of(colnames(patient_data)),
+  "Prediction" = ".pred_class",
+  "Prob No Readmit" = ".pred_No",
+  "Prob Readmit" = ".pred_Yes"
+         )
+         
 ## Save/write the prediction on the second sheet
-
+sheet_write(ss = sheet_id, data = pred_data, sheet = "Patient Data with Prediction")
 
 ##---------------------------------------------------------------------------##
 ##---------------------------------------------------------------------------##
@@ -96,10 +109,31 @@ format_prediction_to_percent <- function(sheet, pos){
   range_req <- googlesheets4:::as_GridRange(range_spec)
   
   ## Specify the cell formatting
+  cell_req <- list(
+    userEnteredFormat = list(
+      numberFormat = list(
+        type = "NUMBER",
+        pattern = "0%"
+      )
+    )
+  )
   
+  field_req <- "userEnteredFormat.numberFormat"
   
   ## Generate and send the API request
-  
+  req <- request_generate(
+    "sheets.spreadsheets.batchUpdate",
+    params = list(
+      spreadsheetId = as_sheets_id(sheet),
+      requests = list(
+        repeatCell = list(
+          range = range_req,
+          cell = cell_req,
+          fields = field_req
+        )
+      )
+    )
+  )
   
   
   ## Execute the request and send the response
@@ -118,7 +152,9 @@ format_prediction_to_percent <- function(sheet, pos){
 ##---------------------------------------------------------------------------##
 
 ## Capture the data of new patients in sheet 1
-
+new_patients <- patient_data |>
+  anti_join(patient_data_with_pred |>
+              select(patient_id))
 
 
 ## If there is a new patient, then make prediction and 
@@ -144,11 +180,13 @@ if(nrow(new_patients) > 0) {
   }
   
   ## Append new patient and prediction to sheet 2
-  
+  sheet_append(ss = sheet_id,
+               data = pred_data,
+               sheet = "Patient Data with Prediction")
   
   ## Format the text col (i.e 0.564 -> 56%)
-  
-  
+  format_prediction_to_percent(sheet_id, pos = "N") # columna N en google sheet
+  format_prediction_to_percent(sheet_id, pos = "O") # Columna O en google sheet
 }
 
 
@@ -171,10 +209,24 @@ if(nrow(new_patients) > 0){
     password = Sys.getenv("GMAIL_PASSWORD")
   )
   
-  send_to <- c("")
+  send_to <- c("antoniolacasta@gmail.com")
   
   ## Create and send email message
-  
+  emayili <- envelope() %>% # la funcion envelope crea mensajes de email
+    from("fruizpace@gmail.com") %>% 
+    to(send_to) %>% 
+    subject("New Readmission Prediction") %>% 
+    emayili::render(
+      input = "R/automate_r_email_content.Rmd", # doc markdown que contiene el correo
+      params = list( # parametros que espera recibir el doc markdown para hacer la tabla
+        patient_id = pred_data$patient_id,
+        pred = pred_data$Prediction,
+        no_readmit = pred_data$`Prob No Readmit`,
+        yes_readmit = pred_data$`Prob Readmit`
+      ),
+      squish = F, # limpiar blank space
+      include_css = "bootstrap" # nicer!
+    )
   
   ## Show as the email sends
   smtp(emayili, verbose = TRUE)
